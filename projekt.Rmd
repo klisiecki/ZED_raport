@@ -292,7 +292,7 @@ rmse(predicted,acctual)
 ```
 
 ##Klasyfikacja
-Klasyfikacja została przeprowadzona na 20 najbardziej licznych klasach w zbiorze.
+Klasyfikacja została przeprowadzona dwukrotnie odpowiedni na 5 i 20 najbardziej licznych klasach w zbiorze.
 ```{r, message=FALSE}
 
 classify <- function(classes_count) {
