@@ -1,0 +1,325 @@
+---
+title: "Projekt"
+author: "Karol Lisiecki"
+date: \`r format(Sys.Date(), "%d.%m.%Y")`\
+output:
+  html_document:
+    toc: true
+---
+
+##Podsumowanie analizy
+Analizowany zbiór danych posiada bardzo dużą liczbę klas (2696) oraz zmiennych (796). Analizę utrudnia również duża liczba wartości NA. Zbadanie korelacji występujących w zbiorze pokazuje że wiele kolumn niesie podobne informacje, co można wykorzystać w ograniczeniu kolumn użytych w regresji i klasyfikacji. W szczególności podobne są korelacje między kolumnami w ramach zbiorów part_XX zawierających wartości dla różnych progów odcięcia. 
+Wyznaczenie najpopularniejszych klas w zbiorze pokazuje bardzo nierównomierny rozkład danych - po przefiltrowaniu danych tylko 18 klas posiada więcej niż 100 obserwacji. Z tego powodu stworzenie klasyfikatora uwzględniającego wszyskie klasy w praktyce nie ma sensu. Dosyć dokładnie możemy przewidywać tylko kilka najbardziej licznych klas. Dla najpopularniejszych 5 klas można uzyskać dokładnośc (accuracy) na poziomie 0.79. Zwiększając liczbę klas do 20 dokładność ulega istotnemu pogorszeniu i wynosi już tylko nieco ponad 0.55.
+Z przeprowadzonych eksperymetnów dotyczących predykcji liczby atomów i elektronów wynika, że predykcja taka jest w pewnym stopniu możliwa. W obu przypadkach uzyskano wartości miary R^2 na poziomie ok. 0.56
+
+##Przed analizą
+
+###Lista wykorzystanych bibliotek
+```{r init, message=FALSE}
+library(plyr)
+library(knitr)
+library(dplyr)
+library(corrplot)
+library(grid)
+library(reshape)
+library(ggplot2)
+library(gridExtra)
+library(Rmisc)
+library(caret)
+library(hydroGOF)
+set.seed(23)
+```
+
+###Powtarzalność wyników
+```{r seed, message=FALSE}
+set.seed(23)
+```
+
+###Wczytanie danych
+```{r readData, cached=TRUE}
+naString <- c("nan", "NA","NaN", " ")
+data <- read.csv2('./all_summary.txt', na.strings = naString, dec='.')
+allClasses <- sapply(data, class)
+```
+
+###Usunięcie wierszy
+Wstępne przetworzenie danych rozpoczyna się od usunięcia wierszy posiadających określoną wartość zmiennej res\_name. Następnie usuwane są wiersze tak aby pary (pdb\_code, res\_name) były unikalne.
+```{r preprocess, cached=TRUE}
+removed_names <- c('DA','DC','DT', 'DU', 'DG', 'DI','UNK', 'UNX', 'UNL', 'PR', 'PD', 'Y1', 'EU', 'N', '15P', 'UQ', 'PX4', 'NAN')
+data2 <- filter(data, !(res_name %in% removed_names))
+
+dp <- duplicated(select(data2, pdb_code, res_name))
+data3 <- data2[!dp, ]
+```
+
+##Analiza danych
+
+###Podsumowanie wartości w każdej kolumnie
+```{r}
+kable(summary(data3))
+```
+
+###Korelacje
+Ze względu na bardzo dużą liczbę zmiennych, korelacje pomiędzy wszystkimi parami bylyby trudne do wizualizacji i oceny. Z tego powodu dane zostały wyselekcjonowane i podzielone na grupy, w ramach których sprawdzono korelacje. Wszystkie poniższe wykresy zostały wygenerowane na wierszach w których w analizowanych kolumnach nie było wartości NA.
+
+W pierwszej kolejności wybrano grupę zmiennych opisujacych podstawowe wlaściwości ligandu z pominięciem kolumn part_XX, które będą badane osobno.
+```{r fig.height=6,fig.width=5}
+M = select(data3, local_volume, local_electrons, local_mean, local_std, local_max, local_skewness, local_parts,solvent_mask_count, void_mask_count, modeled_mask_count, solvent_ratio, local_res_atom_count, local_res_atom_non_h_electron_sum, local_res_atom_non_h_count)
+corrplot(cor(M), method = "circle", type = "upper")
+```
+
+Kolejny krok analizy dotyczyć będzie kolumn rozpoczynających się od frazy "part\_". Z powodu liczby tych kolumn należy wprowadzić pewne podziały. Naturalnym wydaje się podział danch według progów odcięcia. Pierwszy wykres przedstawia wszystkie kolumny dla progu odcięcia równego 0, czyli takie zaczynające się od "part\_00". Dla czytelności usunięto tę fazę z oznaczeń kolumn. 
+```{r fig.width=10, fig.height=10}
+str <- 'part_00'
+M = select(data3, starts_with(str))
+M <- M[complete.cases(M),]
+names(M) <- substr(names(M), nchar(str)+2, 100)
+corrplot(cor(M), method = "circle", type = "upper", tl.cex = 0.6)
+```
+Na wykresie widać dużą liczbę mocnych korelacji dodatnich, występują także pojedyncze korlacje ujemne. 
+
+Korelacje dla kolejnych progów odcięcia są w większości podobne, dlatego poniżej przedstawione zostały w sposób uproszczony: 
+```{r fig.height=15, fig.width=15}
+strs <- c("part_01", "part_02", "part_03", "part_04", "part_05", "part_06", "part_07", "part_08", "part_09")
+layout(matrix(1:9, ncol = 3))
+plots <- list()
+for (str in strs) {
+  M = select(data3, starts_with(str))
+  M <- M[complete.cases(M),]
+  names(M) <- substr(names(M), nchar(str)+2, 100)
+  plots$str <- corrplot(cor(M), method = "circle", type = "upper",  cl.pos = "n", tl.pos = "n", title = str,  mar=c(0,0,1,0))
+}
+```
+
+###Klasy w analizowanym zbiorze
+Analizowany zbiór zawiera bardzo dużą liczbę klas. Poniżej zaprezentowano wyliczenie tej liczby oraz pierwsze 20 klas posortowane wg liczby ligandów które do nich należą.
+```{r}
+classes <- table(select(data3,res_name))
+classes <- sort(classes, decreasing = TRUE)
+length(classes)
+h <- head(classes, 20)
+kable(t(as.matrix(h)))
+```
+
+###Rozkład danych wg liczby atomów i elektronów
+Poniższy wykres prezentuje rozkład danych wg liczby atomów i elektronów. Oś X przedstawia elektrony, a Y - atomy.
+```{r}
+theme_empty <- theme(axis.line=element_blank(),
+      axis.text.x=element_blank(),
+      axis.text.y=element_blank(),
+      axis.ticks=element_blank(),
+      axis.title.x=element_blank(),
+      axis.title.y=element_blank(),
+      legend.position="none",
+      panel.background=element_blank(),
+      panel.border=element_blank(),
+      panel.grid.major=element_blank(),
+      panel.grid.minor=element_blank(),
+      plot.margin = unit(c(0,0,0,0), "lines"))
+
+theme_scale_only <- theme(axis.line=element_blank(),
+      axis.text.x=element_text(size=18),
+      axis.text.y=element_text(size=18, angle=90),
+      axis.title.x=element_blank(),
+      axis.title.y=element_blank(),
+      legend.position="none",
+      panel.background=element_rect(fill = '#5e4fa2', colour = '#5e4fa2'),
+      panel.grid.major=element_blank(),
+      panel.grid.minor=element_blank(),
+      plot.margin = unit(c(0,0,0,0), "lines"))
+
+a <- ggplot(data3, aes(x = local_res_atom_non_h_count)) + stat_bin(binwidth = 1, fill = 'red', color= 'black')  + coord_flip() + theme_empty + xlim(c(0, 100))
+
+e <- ggplot(data3, aes(x = local_res_atom_non_h_electron_sum)) + stat_bin(binwidth = 6, fill = 'red', color= 'black')  + theme_empty+ xlim(c(0, 650))
+
+d <- ggplot(data3, aes(x = local_res_atom_non_h_electron_sum, y = local_res_atom_non_h_count)) + stat_density2d(aes(fill = ..level..), geom="polygon") + scale_fill_gradientn(colours=rev(rainbow(200, start=0, end=0.68))) + guides(alpha=FALSE) +  scale_x_continuous(limits=c(0, 650), breaks=seq(100, 600, 100), expand = c(0, 0)) + scale_y_continuous(limits=c(0, 100), breaks=seq(20, 100, 20), expand = c(0, 0))  + theme_scale_only
+
+blankPlot <- ggplot()+geom_blank(aes(1,1))+
+  theme(plot.background = element_blank(), 
+   panel.grid.major = element_blank(),
+   panel.grid.minor = element_blank(), 
+   panel.border = element_blank(),
+   panel.background = element_blank(),
+   axis.title.x = element_blank(),
+   axis.title.y = element_blank(),
+   axis.text.x = element_blank(), 
+   axis.text.y = element_blank(),
+   axis.ticks = element_blank())
+
+grid.arrange(e, blankPlot, d, a,  ncol=2, nrow=2, widths=c(4, 1), heights=c(1, 4))
+```
+
+
+###Niezgodność liczby atomów i elektronów
+Jako miara niezgodności liczby atomów (local\_res\_atom\_non\_h\_count vs dict\_atom\_non\_h\_count) i elektronów (local\_res\_atom\_non\_h\_count vs dict\_atom\_non\_h\_count) dla poszczególnych klas użyta zostanie średnia.
+
+Przygotowanie danych
+```{r}
+M = select(data3, res_name, local_res_atom_non_h_count, dict_atom_non_h_count, local_res_atom_non_h_electron_sum, dict_atom_non_h_electron_sum)
+M$electronsDiff = abs(M$local_res_atom_non_h_count - M$dict_atom_non_h_count)
+M$atomsDiff = abs(M$local_res_atom_non_h_electron_sum - M$dict_atom_non_h_electron_sum)
+```
+
+Niezgodność liczby elektronów
+```{r}
+ME <- aggregate(M$electronsDiff, by=list(Category=M$res_name), FUN=mean)
+colnames(ME) <- c("group", "mean")
+ME <- ME[order(ME$mean, decreasing = TRUE),]
+kable(head(ME, 20))
+```
+
+Niezgodność liczby atomów
+```{r}
+ME <- aggregate(M$atomsDiff, by=list(Category=M$res_name), FUN=mean)
+colnames(ME) <- c("group", "mean")
+ME <- ME[order(ME$mean, decreasing = TRUE),]
+kable(head(ME, 20))
+```
+
+###Rozkłady wartości kolumn part_01
+```{r fig.height=5, fig.width=5, message=FALSE}
+M = select(data3, starts_with('part_01'))
+
+ggplot(M, aes(x=c(M[,1]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,1]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,1])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_blob_electron_sum")
+ggplot(M, aes(x=c(M[,2]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,2]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,2])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_blob_volume_sum")
+ggplot(M, aes(x=c(M[,3]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,3]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,3])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_blob_parts")
+M <- M[complete.cases(M),]
+ggplot(M, aes(x=c(M[,4]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,4]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,4])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_O3")
+ggplot(M, aes(x=c(M[,5]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,5]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,5])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_O4")
+ggplot(M, aes(x=c(M[,6]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,6]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,6])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_O5")
+ggplot(M, aes(x=c(M[,7]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,7]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,7])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_FL")
+ggplot(M, aes(x=c(M[,8]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,8]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,8])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_O3_norm")
+ggplot(M, aes(x=c(M[,9]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,9]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,9])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_O4_norm")
+ggplot(M, aes(x=c(M[,10]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,10]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,10])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_O5_norm")
+ggplot(M, aes(x=c(M[,11]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,11]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,11])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_FL_norm")
+ggplot(M, aes(x=c(M[,12]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,12]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,12])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_I1")
+ggplot(M, aes(x=c(M[,13]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,13]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,13])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_I2")
+ggplot(M, aes(x=c(M[,14]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,14]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,14])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_I3")
+ggplot(M, aes(x=c(M[,15]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,15]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,15])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_I4")
+ggplot(M, aes(x=c(M[,16]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,16]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,16])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_I5")
+ggplot(M, aes(x=c(M[,17]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,17]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,17])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_I6")
+ggplot(M, aes(x=c(M[,18]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,18]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,18])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_I1_norm")
+ggplot(M, aes(x=c(M[,19]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,19]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,19])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_I2_norm")
+ggplot(M, aes(x=c(M[,20]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,20]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,20])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_I3_norm")
+ggplot(M, aes(x=c(M[,21]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,21]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,21])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_I4_norm")
+ggplot(M, aes(x=c(M[,22]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,22]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,22])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_I5_norm")
+ggplot(M, aes(x=c(M[,23]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,23]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,23])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_I6_norm")
+ggplot(M, aes(x=c(M[,24]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,24]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,24])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_I1_scaled")
+ggplot(M, aes(x=c(M[,25]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,25]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,25])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_I2_scaled")
+ggplot(M, aes(x=c(M[,26]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,26]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,26])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_I3_scaled")
+ggplot(M, aes(x=c(M[,27]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,27]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,27])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_I4_scaled")
+ggplot(M, aes(x=c(M[,28]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,28]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,28])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_I5_scaled")
+ggplot(M, aes(x=c(M[,29]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,29]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,29])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_I6_scaled")
+ggplot(M, aes(x=c(M[,30]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,30]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,30])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_M000")
+ggplot(M, aes(x=c(M[,31]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,31]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,31])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_E3_E1")
+ggplot(M, aes(x=c(M[,32]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,32]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,32])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_E2_E1")
+ggplot(M, aes(x=c(M[,33]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,33]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,33])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_E3_E2")
+ggplot(M, aes(x=c(M[,34]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,34]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,34])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_sqrt_E1")
+ggplot(M, aes(x=c(M[,35]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,35]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,35])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_sqrt_E2")
+ggplot(M, aes(x=c(M[,36]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,36]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,36])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_shape_sqrt_E3")
+ggplot(M, aes(x=c(M[,37]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,37]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,37])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_O3")
+ggplot(M, aes(x=c(M[,38]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,38]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,38])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_O4")
+ggplot(M, aes(x=c(M[,39]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,39]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,39])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_O5")
+ggplot(M, aes(x=c(M[,40]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,40]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,40])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_FL")
+ggplot(M, aes(x=c(M[,41]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,41]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,41])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_O3_norm")
+ggplot(M, aes(x=c(M[,42]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,42]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,42])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_O4_norm")
+ggplot(M, aes(x=c(M[,43]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,43]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,43])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_O5_norm")
+ggplot(M, aes(x=c(M[,44]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,44]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,44])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_FL_norm")
+ggplot(M, aes(x=c(M[,45]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,45]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,45])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_I1")
+ggplot(M, aes(x=c(M[,46]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,46]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,46])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_I2")
+ggplot(M, aes(x=c(M[,47]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,47]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,47])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_I3")
+ggplot(M, aes(x=c(M[,48]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,48]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,48])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_I4")
+ggplot(M, aes(x=c(M[,49]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,49]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,49])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_I5")
+ggplot(M, aes(x=c(M[,50]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,50]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,50])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_I6")
+ggplot(M, aes(x=c(M[,51]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,51]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,51])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_I1_norm")
+ggplot(M, aes(x=c(M[,52]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,52]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,52])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_I2_norm")
+ggplot(M, aes(x=c(M[,53]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,53]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,53])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_I3_norm")
+ggplot(M, aes(x=c(M[,54]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,54]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,54])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_I4_norm")
+ggplot(M, aes(x=c(M[,55]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,55]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,55])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_I5_norm")
+ggplot(M, aes(x=c(M[,56]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,56]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,56])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_I6_norm")
+ggplot(M, aes(x=c(M[,57]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,57]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,57])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_I1_scaled")
+ggplot(M, aes(x=c(M[,58]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,58]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,58])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_I2_scaled")
+ggplot(M, aes(x=c(M[,59]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,59]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,59])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_I3_scaled")
+ggplot(M, aes(x=c(M[,60]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,60]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,60])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_I4_scaled")
+ggplot(M, aes(x=c(M[,61]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,61]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,61])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_I5_scaled")
+ggplot(M, aes(x=c(M[,62]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,62]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,62])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_I6_scaled")
+ggplot(M, aes(x=c(M[,63]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,63]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,63])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_M000")
+ggplot(M, aes(x=c(M[,64]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,64]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,64])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_E3_E1")
+ggplot(M, aes(x=c(M[,65]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,65]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,65])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_E2_E1")
+ggplot(M, aes(x=c(M[,66]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,66]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,66])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_E3_E2")
+ggplot(M, aes(x=c(M[,67]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,67]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,67])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_sqrt_E1")
+ggplot(M, aes(x=c(M[,68]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,68]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,68])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_sqrt_E2")
+ggplot(M, aes(x=c(M[,69]))) + geom_density()+ geom_vline(aes(xintercept=mean(c(M[,69]), na.rm=T)), color="red", linetype="dashed", size=1)+geom_text(aes(x=mean(c(M[,69])), y=0, vjust=-1, hjust=-0.2, label = round(..x.., digits=4))) + labs(x="part_01_density_sqrt_E3")
+```
+
+##Regresja
+Do przewidywania liczby atomów i elektronów zdecydowano się wykorzystać kolumny z grupy part\_00. Wybrano te kolumny które mają największe korelacje z kolumną part\_00\_blob\_electron\_sum
+
+###Przewidywanie liczby elektronów
+```{r, message=FALSE}
+M = select(data3, one_of("local_res_atom_non_h_electron_sum", "part_00_blob_electron_sum", "part_00_shape_O3", "part_00_shape_M000", "part_00_shape_sqrt_E1", "part_00_shape_sqrt_E2", "part_00_shape_sqrt_E3", "part_00_density_O3", "part_00_density_M000"))
+M <- M[complete.cases(M),]
+
+ctrl <- trainControl(method = "repeatedcv", number = 3)
+fit <- train(local_res_atom_non_h_electron_sum ~ ., data = M, method = "glm", trControl = ctrl)
+
+predicted <- predict(fit, newdata = M)
+acctual <- M$local_res_atom_non_h_electron_sum
+```
+
+Miary R^2 i RMSE dla predykcji liczby elektronów
+```{r}
+cor(acctual,predicted)^2
+rmse(predicted,acctual)
+```
+
+###Przewidywanie liczby atomów
+```{r, message=FALSE}
+M = select(data3, one_of("local_res_atom_non_h_count", "part_00_blob_electron_sum", "part_00_shape_O3", "part_00_shape_M000", "part_00_shape_sqrt_E1", "part_00_shape_sqrt_E2", "part_00_shape_sqrt_E3", "part_00_density_O3", "part_00_density_M000"))
+M <- M[complete.cases(M),]
+
+ctrl <- trainControl(method = "repeatedcv", number = 3)
+fit <- train(local_res_atom_non_h_count ~ ., data = M, method = "glm", trControl = ctrl)
+
+predicted <- predict(fit, newdata = M)
+acctual <- M$local_res_atom_non_h_count
+```
+
+Miary R^2 i RMSE dla predykcji liczby atomów
+```{r}
+cor(acctual,predicted)^2
+rmse(predicted,acctual)
+```
+
+##Klasyfikacja
+Klasyfikacja została przeprowadzona na 20 najbardziej licznych klasach w zbiorze.
+```{r, message=FALSE}
+
+classify <- function(classes_count) {
+  M = select(data3, matches('res_name|part_00.*|local_electrons|local_mean|local_std|local_max|local_skewness|local_parts,solvent_mask_count|void_mask_count|modeled_mask_count|solvent_ratio'))
+  M <- M[complete.cases(M),]
+  
+  classes <- table(select(M,res_name))
+  classes <- sort(classes, decreasing = TRUE)
+  top <- head(classes, classes_count)
+  
+  Mf <- filter(M, is.element(res_name, names(top)))
+  Mf$res_name <- factor(Mf$res_name)
+  
+  inTraining <- createDataPartition(y = Mf$res_name, p = .5, list = FALSE)
+  
+  training <- Mf[ inTraining,]
+  testing  <- Mf[-inTraining,]
+  
+  ctrl <- trainControl(method = "repeatedcv", number = 2, repeats = 5)
+  
+  fit <- train(res_name ~ part_00_blob_electron_sum+part_00_blob_volume_sum+part_00_blob_parts+part_00_shape_O3+part_00_shape_O4+part_00_shape_O5+part_00_shape_FL+part_00_shape_O3_norm+part_00_shape_O4_norm+part_00_shape_O5_norm+part_00_shape_FL_norm+part_00_shape_I1+part_00_shape_I2+part_00_shape_I3+part_00_shape_I4+part_00_shape_I5+part_00_shape_I6+part_00_shape_I1_norm+part_00_shape_I2_norm+part_00_shape_I3_norm+part_00_shape_I4_norm+part_00_shape_I5_norm+part_00_shape_I6_norm+part_00_shape_I1_scaled+part_00_shape_I2_scaled+part_00_shape_I3_scaled+part_00_shape_I4_scaled+part_00_shape_I5_scaled+part_00_shape_I6_scaled+part_00_shape_M000+part_00_shape_E3_E1+part_00_shape_E2_E1+part_00_shape_E3_E2+part_00_shape_sqrt_E1+part_00_shape_sqrt_E2+part_00_shape_sqrt_E3+part_00_density_O3+part_00_density_O4+part_00_density_O5+part_00_density_FL+part_00_density_O3_norm+part_00_density_O4_norm+part_00_density_O5_norm+part_00_density_FL_norm+part_00_density_I1+part_00_density_I2+part_00_density_I3+part_00_density_I4+part_00_density_I5+part_00_density_I6+part_00_density_I1_norm+part_00_density_I2_norm+part_00_density_I3_norm+part_00_density_I4_norm+part_00_density_I5_norm+part_00_density_I6_norm+part_00_density_I1_scaled+part_00_density_I2_scaled+part_00_density_I3_scaled+part_00_density_I4_scaled+part_00_density_I5_scaled+part_00_density_I6_scaled+part_00_density_M000+part_00_density_E3_E1+part_00_density_E2_E1+part_00_density_E3_E2+part_00_density_sqrt_E1+part_00_density_sqrt_E2+part_00_density_sqrt_E3+local_electrons+local_mean+local_std+local_max+local_skewness+void_mask_count+modeled_mask_count+solvent_ratio, data = training, method = "rf", trControl = ctrl)
+  
+  predicted <- predict(fit, newdata = testing)
+  
+  confusionMatrix(data = predicted, testing$res_name)
+}
+
+classify(classes_count = 5)
+classify(classes_count = 20)
+```
